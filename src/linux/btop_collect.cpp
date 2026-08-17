@@ -1922,7 +1922,7 @@ namespace Gpu {
 					for (const auto& gt : fs::directory_iterator(tile.path())) {
 						if (not gt.is_directory() or not gt.path().filename().string().starts_with("gt")) continue;
 						const fs::path idle = gt.path() / "gtidle" / "idle_residency_ms";
-						const fs::path freq = gt.path() / "freq0" / "act_freq";
+						const fs::path freq = gt.path() / "freq0" / "cur_freq";
 						if (not fs::exists(idle)) continue;
 						const string gt_name = readfile(gt.path() / "gtidle" / "name", "");
 						if (any_idle.empty()) {
