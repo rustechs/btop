@@ -283,10 +283,19 @@ namespace Gpu {
 	}
 
 
-	//? Intel data collection
+	//? Intel data collection (i915 PMU, or Xe sysfs gtidle when i915 is absent)
 	namespace Intel {
 		const char* device = "i915";
 		struct engines *engines = nullptr;
+		bool using_xe_sysfs = false;
+		struct xe_gt_sample {
+			fs::path idle_path;
+			fs::path freq_path;
+			uint64_t prev_idle = 0;
+			std::chrono::steady_clock::time_point prev_ts{};
+			bool have_prev = false;
+		};
+		xe_gt_sample xe_rc{};
 
 		bool initialized = false;
 		bool init();
@@ -927,6 +936,9 @@ namespace Cpu {
 
 		//? Get charging/discharging status
 		string status = str_to_lower(readfile(b.base_dir / "status", "unknown"));
+		// Linux reports "Not charging" when AC is connected and the pack is held
+		// (full, or at a charge limit). btop only understands charging/discharging/full.
+		if (status == "not charging") status = "full";
 		if (status == "unknown" and not b.online.empty()) {
 			const auto online = readfile(b.online, "0");
 			if (online == "1" and percent < 100) status = "charging";
@@ -1883,59 +1895,103 @@ namespace Gpu {
 	}
 
 	namespace Intel {
+		static bool read_u64_path(const fs::path& path, uint64_t& out) {
+			try {
+				out = static_cast<uint64_t>(stoull(readfile(path, "")));
+				return true;
+			}
+			catch (const std::invalid_argument&) { return false; }
+			catch (const std::out_of_range&) { return false; }
+		}
+
+		static bool discover_xe_gtidle(xe_gt_sample& sample) {
+			const fs::path drm{"/sys/class/drm"};
+			if (not fs::is_directory(drm)) return false;
+
+			for (const auto& card : fs::directory_iterator(drm)) {
+				const string name = card.path().filename().string();
+				if (not name.starts_with("card") or name.find('-') != string::npos) continue;
+				const auto vendor = readfile(card.path() / "device" / "vendor", "");
+				if (vendor.find("8086") == string::npos) continue;
+
+				fs::path rc_idle, any_idle, rc_freq, any_freq;
+				const fs::path device_dir = card.path() / "device";
+				if (not fs::is_directory(device_dir)) continue;
+				for (const auto& tile : fs::directory_iterator(device_dir)) {
+					if (not tile.is_directory() or not tile.path().filename().string().starts_with("tile")) continue;
+					for (const auto& gt : fs::directory_iterator(tile.path())) {
+						if (not gt.is_directory() or not gt.path().filename().string().starts_with("gt")) continue;
+						const fs::path idle = gt.path() / "gtidle" / "idle_residency_ms";
+						const fs::path freq = gt.path() / "freq0" / "act_freq";
+						if (not fs::exists(idle)) continue;
+						const string gt_name = readfile(gt.path() / "gtidle" / "name", "");
+						if (any_idle.empty()) {
+							any_idle = idle;
+							if (fs::exists(freq)) any_freq = freq;
+						}
+						if (gt_name.find("-rc") != string::npos) {
+							rc_idle = idle;
+							if (fs::exists(freq)) rc_freq = freq;
+						}
+					}
+				}
+				if (rc_idle.empty()) rc_idle = any_idle;
+				if (rc_freq.empty()) rc_freq = any_freq;
+				if (rc_idle.empty()) continue;
+				sample.idle_path = rc_idle;
+				sample.freq_path = rc_freq;
+				sample.have_prev = false;
+				Logger::info("Intel GPU: using Xe gtidle sysfs at {}", rc_idle.string());
+				return true;
+			}
+			return false;
+		}
+
+		static void finish_intel_init(const char* gpu_device_name) {
+			device_count = 1;
+			gpus.resize(gpus.size() + device_count);
+			gpu_names.resize(gpus.size() + device_count);
+			gpu_names[Nvml::device_count + Rsmi::device_count] = gpu_device_name ? string(gpu_device_name) : "Intel GPU";
+			initialized = true;
+			Intel::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count);
+		}
+
 		bool init() {
 			if (initialized) return false;
 
 			char *gpu_path = find_intel_gpu_dir();
-			if (!gpu_path) {
-				Logger::debug("Failed to find Intel GPU sysfs path, Intel GPUs will not be detected");
-				return false;
-			}
-
-			char *gpu_device_id = get_intel_device_id(gpu_path);
-			if (!gpu_device_id) {
-				Logger::debug("Failed to find Intel GPU device ID, Intel GPUs will not be detected");
-				return false;
-			}
-
-			char *gpu_device_name = get_intel_device_name(gpu_device_id);
-			if (!gpu_device_name) {
-				Logger::warning("Failed to find Intel GPU device name in internal database");
-			}
-
-			free(gpu_device_id);
+			char *gpu_device_id = gpu_path ? get_intel_device_id(gpu_path) : nullptr;
+			char *gpu_device_name = gpu_device_id ? get_intel_device_name(gpu_device_id) : nullptr;
+			if (gpu_device_id) free(gpu_device_id);
+			if (gpu_device_name == nullptr and gpu_path != nullptr)
+				Logger::debug("Failed to find Intel GPU device name in internal database");
 
 			engines = discover_engines(device);
-			if (!engines) {
-				Logger::debug("Failed to find Intel GPU engines, Intel GPUs will not be detected");
-				return false;
+			if (engines) {
+				int ret = pmu_init(engines);
+				if (ret) {
+					Logger::debug("Intel GPU: i915 PMU init failed, trying Xe sysfs");
+					free_engines(engines);
+					engines = nullptr;
+				} else {
+					pmu_sample(engines);
+					using_xe_sysfs = false;
+					finish_intel_init(gpu_device_name);
+					if (gpu_device_name) free(gpu_device_name);
+					return true;
+				}
 			}
 
-			int ret = pmu_init(engines);
-			if (ret) {
-				Logger::warning("Intel GPU: Failed to initialize PMU");
-				return false;
+			if (discover_xe_gtidle(xe_rc)) {
+				using_xe_sysfs = true;
+				finish_intel_init(gpu_device_name);
+				if (gpu_device_name) free(gpu_device_name);
+				return true;
 			}
 
-			pmu_sample(engines);
-
-			device_count = 1;
-
-			gpus.resize(gpus.size() + device_count);
-			gpu_names.resize(gpus.size() + device_count);
-
-			if (gpu_device_name) {
-				gpu_names[Nvml::device_count + Rsmi::device_count] = string(gpu_device_name);
-			} else {
-				gpu_names[Nvml::device_count + Rsmi::device_count] = "Intel GPU";
-			}
-
-			free(gpu_device_name);
-
-			initialized = true;
-			Intel::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count);
-
-			return true;
+			if (gpu_device_name) free(gpu_device_name);
+			Logger::debug("Intel GPU: no i915 PMU and no Xe gtidle sysfs, Intel GPUs will not be detected");
+			return false;
 		}
 
 		bool shutdown() {
@@ -1944,6 +2000,8 @@ namespace Gpu {
 				free_engines(engines);
 				engines = nullptr;
 			}
+			using_xe_sysfs = false;
+			xe_rc = {};
 			initialized = false;
 			return true;
 		}
@@ -1955,9 +2013,9 @@ namespace Gpu {
 				gpus_slice->supported_functions = {
 					.gpu_utilization = true,
 					.mem_utilization = false,
-					.gpu_clock = true,
+					.gpu_clock = not using_xe_sysfs or not xe_rc.freq_path.empty(),
 					.mem_clock = false,
-					.pwr_usage = true,
+					.pwr_usage = not using_xe_sysfs,
 					.pwr_state = false,
 					.temp_info = false,
 					.mem_total = false,
@@ -1968,6 +2026,31 @@ namespace Gpu {
 				};
 
 				gpus_slice->pwr_max_usage = 10'000; //? 10W
+			}
+
+			if (using_xe_sysfs) {
+				uint64_t idle_ms = 0;
+				if (not read_u64_path(xe_rc.idle_path, idle_ms)) return false;
+				const auto now = std::chrono::steady_clock::now();
+				long long util = 0;
+				if (xe_rc.have_prev) {
+					const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - xe_rc.prev_ts).count();
+					if (wall_ms > 0 and idle_ms >= xe_rc.prev_idle) {
+						const double busy = 1.0 - (static_cast<double>(idle_ms - xe_rc.prev_idle) / static_cast<double>(wall_ms));
+						util = clamp(static_cast<long long>(round(busy * 100.0)), 0ll, 100ll);
+					}
+				}
+				xe_rc.prev_idle = idle_ms;
+				xe_rc.prev_ts = now;
+				xe_rc.have_prev = true;
+				gpus_slice->gpu_percent.at("gpu-totals").push_back(util);
+
+				if (not xe_rc.freq_path.empty()) {
+					uint64_t freq = 0;
+					if (read_u64_path(xe_rc.freq_path, freq))
+						gpus_slice->gpu_clock_speed = static_cast<unsigned int>(freq);
+				}
+				return true;
 			}
 
 			pmu_sample(engines);
