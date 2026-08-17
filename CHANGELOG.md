@@ -1,3 +1,11 @@
+## Unreleased (rustechs)
+
+References | Description | Author(s)
+--- | --- | ---
+Xe gtidle | Detect Lunar Lake / Xe-driver iGPUs via sysfs idle_residency_ms when i915 PMU is absent | rustechs
+Battery | Treat sysfs status Not charging as full | rustechs
+Themes | Load an existing absolute .theme path even when it is outside the binary theme directory | rustechs
+
 ## v1.4.7
 
 References | Description | Author(s)

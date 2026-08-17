@@ -445,10 +445,14 @@ namespace Theme {
 	void setTheme() {
 		const auto& theme = Config::getS("color_theme");
 		fs::path theme_path;
-		for (const fs::path p : themes) {
-			if (p == theme or p.stem() == theme or p.filename() == theme) {
-				theme_path = p;
-				break;
+		if (const fs::path configured{theme}; configured.is_absolute() and configured.extension() == ".theme" and fs::exists(configured)) {
+			theme_path = configured;
+		} else {
+			for (const fs::path p : themes) {
+				if (p == theme or p.stem() == theme or p.filename() == theme) {
+					theme_path = p;
+					break;
+				}
 			}
 		}
 		if (theme == "TTY" or Config::getB("tty_mode"))
