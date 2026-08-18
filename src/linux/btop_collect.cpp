@@ -297,6 +297,11 @@ namespace Gpu {
 			bool have_prev = false;
 		};
 		vector<xe_gt_sample> xe_gts;
+		struct xe_box {
+			size_t primary = 0;
+			std::optional<size_t> media;
+		};
+		vector<xe_box> xe_boxes;
 
 		bool initialized = false;
 		bool init();
@@ -402,6 +407,7 @@ namespace Shared {
 			gpu_b_height_offsets.resize(gpus.size());
 			for (size_t i = 0; i < gpu_b_height_offsets.size(); ++i)
 				gpu_b_height_offsets[i] = gpus[i].supported_functions.gpu_utilization
+					   + gpus[i].supported_functions.gpu_media_utilization
 					   + gpus[i].supported_functions.pwr_usage
 					   + (gpus[i].supported_functions.encoder_utilization or gpus[i].supported_functions.decoder_utilization)
 					   + (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
@@ -1969,14 +1975,31 @@ namespace Gpu {
 			return false;
 		}
 
+		static void build_xe_boxes() {
+			xe_boxes.clear();
+			if (xe_gts.empty()) return;
+
+			xe_box first{};
+			first.primary = 0;
+			if (xe_gts.size() > 1 and xe_gts[1].gt_name.find("-mc") != string::npos)
+				first.media = 1;
+			xe_boxes.push_back(first);
+
+			for (size_t i = 1; i < xe_gts.size(); ++i) {
+				if (first.media.has_value() and i == first.media.value()) continue;
+				xe_boxes.push_back(xe_box{.primary = i, .media = std::nullopt});
+			}
+		}
+
 		static void finish_intel_init(const char* gpu_device_name) {
 			gpus.resize(gpus.size() + device_count);
 			gpu_names.resize(gpus.size());
 			const size_t intel_base = Nvml::device_count + Rsmi::device_count;
 			if (using_xe_sysfs) {
-				const bool multi = xe_gts.size() > 1;
-				for (size_t i = 0; i < xe_gts.size(); ++i)
-					gpu_names[intel_base + i] = xe_display_name(gpu_device_name, xe_gts[i], multi);
+				for (size_t i = 0; i < xe_boxes.size(); ++i) {
+					const bool paired = xe_boxes[i].media.has_value();
+					gpu_names[intel_base + i] = xe_display_name(gpu_device_name, xe_gts[xe_boxes[i].primary], not paired and xe_gts.size() > 1);
+				}
 			} else {
 				gpu_names[intel_base] = gpu_device_name ? string(gpu_device_name) : "Intel GPU";
 			}
@@ -2020,19 +2043,21 @@ namespace Gpu {
 
 			if (discover_xe_gtidle()) {
 				using_xe_sysfs = true;
+				build_xe_boxes();
 				const uint32_t slots = gpu_boxes_remaining();
-				if (xe_gts.size() > slots) {
-					Logger::info("Intel GPU: {} Xe GT(s) exceed gpu0-gpu5 ({} already taken); keeping {}",
-						xe_gts.size(), Nvml::device_count + Rsmi::device_count, slots);
-					xe_gts.resize(slots);
+				if (xe_boxes.size() > slots) {
+					Logger::info("Intel GPU: {} Xe GPU box(es) exceed gpu0-gpu5 ({} already taken); keeping {}",
+						xe_boxes.size(), Nvml::device_count + Rsmi::device_count, slots);
+					xe_boxes.resize(slots);
 				}
-				if (xe_gts.empty()) {
+				if (xe_boxes.empty()) {
 					using_xe_sysfs = false;
+					xe_gts.clear();
 					if (gpu_device_name) free(gpu_device_name);
 					Logger::debug("Intel GPU: no remaining GPU boxes for Xe GTs");
 					return false;
 				}
-				device_count = static_cast<uint32_t>(xe_gts.size());
+				device_count = static_cast<uint32_t>(xe_boxes.size());
 				finish_intel_init(gpu_device_name);
 				if (gpu_device_name) free(gpu_device_name);
 				return true;
@@ -2051,11 +2076,12 @@ namespace Gpu {
 			}
 			using_xe_sysfs = false;
 			xe_gts.clear();
+			xe_boxes.clear();
 			initialized = false;
 			return true;
 		}
 
-		static void collect_xe_gt(gpu_info& gpu, xe_gt_sample& sample) {
+		static void collect_xe_gt(gpu_info& gpu, xe_gt_sample& sample, const string& percent_key, unsigned int* clock_out) {
 			uint64_t idle_ms = 0;
 			long long util = 0;
 			if (read_u64_path(sample.idle_path, idle_ms)) {
@@ -2073,12 +2099,12 @@ namespace Gpu {
 			} else {
 				sample.have_prev = false;
 			}
-			gpu.gpu_percent.at("gpu-totals").push_back(util);
+			gpu.gpu_percent.at(percent_key).push_back(util);
 
-			if (not sample.freq_path.empty()) {
+			if (clock_out != nullptr and not sample.freq_path.empty()) {
 				uint64_t freq = 0;
 				if (read_u64_path(sample.freq_path, freq))
-					gpu.gpu_clock_speed = static_cast<unsigned int>(freq);
+					*clock_out = static_cast<unsigned int>(freq);
 			}
 		}
 
@@ -2087,11 +2113,12 @@ namespace Gpu {
 
 			if (using_xe_sysfs) {
 				for (uint32_t i = 0; i < device_count; ++i) {
+					const auto& box = xe_boxes[i];
 					if constexpr(is_init) {
 						gpus_slice[i].supported_functions = {
 							.gpu_utilization = true,
 							.mem_utilization = false,
-							.gpu_clock = not xe_gts[i].freq_path.empty(),
+							.gpu_clock = not xe_gts[box.primary].freq_path.empty(),
 							.mem_clock = false,
 							.pwr_usage = false,
 							.pwr_state = false,
@@ -2100,11 +2127,14 @@ namespace Gpu {
 							.mem_used = false,
 							.pcie_txrx = false,
 							.encoder_utilization = false,
-							.decoder_utilization = false
+							.decoder_utilization = false,
+							.gpu_media_utilization = box.media.has_value()
 						};
 						gpus_slice[i].pwr_max_usage = 10'000; //? 10W
 					}
-					collect_xe_gt(gpus_slice[i], xe_gts[i]);
+					collect_xe_gt(gpus_slice[i], xe_gts[box.primary], "gpu-totals", &gpus_slice[i].gpu_clock_speed);
+					if (box.media.has_value())
+						collect_xe_gt(gpus_slice[i], xe_gts[box.media.value()], "gpu-media-totals", nullptr);
 				}
 				return true;
 			}
@@ -2185,6 +2215,7 @@ namespace Gpu {
 			if (width != 0) {
 				//? GPU & memory utilization
 				while (cmp_greater(gpu.gpu_percent.at("gpu-totals").size(), width * 2)) gpu.gpu_percent.at("gpu-totals").pop_front();
+				while (cmp_greater(gpu.gpu_percent.at("gpu-media-totals").size(), width * 2)) gpu.gpu_percent.at("gpu-media-totals").pop_front();
 				while (cmp_greater(gpu.mem_utilization_percent.size(), width)) gpu.mem_utilization_percent.pop_front();
 				//? Power usage
 				while (cmp_greater(gpu.gpu_percent.at("gpu-pwr-totals").size(), width)) gpu.gpu_percent.at("gpu-pwr-totals").pop_front();
