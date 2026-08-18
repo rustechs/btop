@@ -2029,19 +2029,22 @@ namespace Gpu {
 
 		static void collect_xe_gt(gpu_info& gpu, xe_gt_sample& sample) {
 			uint64_t idle_ms = 0;
-			if (not read_u64_path(sample.idle_path, idle_ms)) return;
-			const auto now = std::chrono::steady_clock::now();
 			long long util = 0;
-			if (sample.have_prev) {
-				const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - sample.prev_ts).count();
-				if (wall_ms > 0 and idle_ms >= sample.prev_idle) {
-					const double busy = 1.0 - (static_cast<double>(idle_ms - sample.prev_idle) / static_cast<double>(wall_ms));
-					util = clamp(static_cast<long long>(round(busy * 100.0)), 0ll, 100ll);
+			if (read_u64_path(sample.idle_path, idle_ms)) {
+				const auto now = std::chrono::steady_clock::now();
+				if (sample.have_prev) {
+					const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - sample.prev_ts).count();
+					if (wall_ms > 0 and idle_ms >= sample.prev_idle) {
+						const double busy = 1.0 - (static_cast<double>(idle_ms - sample.prev_idle) / static_cast<double>(wall_ms));
+						util = clamp(static_cast<long long>(round(busy * 100.0)), 0ll, 100ll);
+					}
 				}
+				sample.prev_idle = idle_ms;
+				sample.prev_ts = now;
+				sample.have_prev = true;
+			} else {
+				sample.have_prev = false;
 			}
-			sample.prev_idle = idle_ms;
-			sample.prev_ts = now;
-			sample.have_prev = true;
 			gpu.gpu_percent.at("gpu-totals").push_back(util);
 
 			if (not sample.freq_path.empty()) {
@@ -2141,7 +2144,7 @@ namespace Gpu {
 		long long mem_total = 0;
 		long long pwr_total = 0;
 		for (auto& gpu : gpus) {
-			if (gpu.supported_functions.gpu_utilization)
+			if (gpu.supported_functions.gpu_utilization and not gpu.gpu_percent.at("gpu-totals").empty())
 				avg += gpu.gpu_percent.at("gpu-totals").back();
 			if (gpu.supported_functions.mem_used)
 				mem_usage_total += gpu.mem_used;
