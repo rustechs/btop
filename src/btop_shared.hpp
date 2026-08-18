@@ -141,7 +141,8 @@ namespace Gpu {
 				 mem_used = true,
 				 pcie_txrx = true,
 				 encoder_utilization = true,
-				 decoder_utilization = true;
+				 decoder_utilization = true,
+				 gpu_media_utilization = false;
 	};
 
 	//* Per-device container for GPU info
@@ -150,6 +151,7 @@ namespace Gpu {
 			{"gpu-totals", {}},
 			{"gpu-vram-totals", {}},
 			{"gpu-pwr-totals", {}},
+			{"gpu-media-totals", {}},
 		};
 		unsigned int gpu_clock_speed; // MHz
 

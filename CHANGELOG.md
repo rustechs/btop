@@ -3,11 +3,12 @@
 References | Description | Author(s)
 --- | --- | ---
 Xe gtidle | Detect Lunar Lake / Xe-driver iGPUs via sysfs idle_residency_ms; clock from cur_freq | rustechs
-Xe media GT | Expose Xe media engine (`*-mc`) as a separate GPU box instead of dropping it | rustechs
+Xe media GT | Pair Xe media engine (`*-mc`) into gpu0: inverted lower graph, MPU meter, and gpu▲▼mpu divider | rustechs
 CI matrix | rustechs fork: one x86_64 musl job on push/PR; BSD CMake/continuous builds are workflow_dispatch only | rustechs
 Xe idle read | On a failed Xe gtidle read, push 0% util so gpu-totals.back() cannot throw | rustechs
 Xe GPU boxes | Cap Intel GTs (Xe and i915) at gpu0-gpu5 remaining after NVIDIA/AMD devices | rustechs
 Battery | Treat sysfs status Not charging as full | rustechs
+Battery BAT | Full state uses ✓; space between BAT and charge/discharge symbol | rustechs
 Themes | Load an existing absolute .theme path even when it is outside the binary theme directory | rustechs
 
 ## v1.4.7

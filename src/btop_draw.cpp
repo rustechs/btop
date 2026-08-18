@@ -741,7 +741,7 @@ namespace Cpu {
 			static const std::unordered_map<string, string> bat_symbols = {
 				{"charging", "▲"},
 				{"discharging", "▼"},
-				{"full", "■"},
+				{"full", "✓"},
 				{"unknown", "○"}
 			};
 
@@ -764,7 +764,7 @@ namespace Cpu {
 				bat_pos = current_pos;
 				bat_len = current_len;
 
-				out += Mv::to(y, bat_pos) + title_left + Theme::c("title") + Fx::b + "BAT" + bat_symbol + ' ' + str_percent
+				out += Mv::to(y, bat_pos) + title_left + Theme::c("title") + Fx::b + "BAT " + bat_symbol + ' ' + str_percent
 					+ (Term::width >= 100 ? Fx::ub + ' ' + bat_meter(percent) + Fx::b : "")
 					+ (not str_time.empty() ? ' ' + Theme::c("title") + str_time : "") + (not str_watts.empty() ? " " + Theme::c("title") + Fx::b + str_watts : "") + Fx::ub + title_right;
 			}
@@ -1007,11 +1007,13 @@ namespace Gpu {
 	int shown = 0;
 	int count = 0;
 	vector<int> shown_panels = {};
-	int graph_up_height;
+	vector<int> graph_up_height_vec = {};
+	vector<bool> graph_mid_line_vec = {};
 	vector<Draw::Graph> graph_upper_vec = {}, graph_lower_vec = {};
 	vector<Draw::Graph> temp_graph_vec = {};
 	vector<Draw::Graph> mem_used_graph_vec = {}, mem_util_graph_vec = {};
 	vector<Draw::Meter> gpu_meter_vec = {};
+	vector<Draw::Meter> media_meter_vec = {};
 	vector<Draw::Meter> pwr_meter_vec = {};
 	vector<Draw::Meter> enc_meter_vec = {};
 	vector<string> box = {};
@@ -1030,6 +1032,7 @@ namespace Gpu {
 		auto& mem_used_graph = mem_used_graph_vec[index];
 		auto& mem_util_graph = mem_util_graph_vec[index];
 		auto& gpu_meter = gpu_meter_vec[index];
+		auto& media_meter = media_meter_vec[index];
 		auto& pwr_meter = pwr_meter_vec[index];
 		auto& enc_meter = enc_meter_vec[index];
 
@@ -1039,7 +1042,9 @@ namespace Gpu {
 		auto& temp_scale = Config::getS("temp_scale");
 		auto& graph_symbol = (tty_mode ? "tty" : Config::getS("graph_symbol_gpu"));
 		auto& graph_bg = Symbols::graph_symbols.at((graph_symbol == "default" ? Config::getS("graph_symbol") + "_up" : graph_symbol + "_up")).at(6);
-        auto single_graph = !Config::getB("gpu_mirror_graph");
+        auto single_graph = not gpu.supported_functions.gpu_media_utilization and not Config::getB("gpu_mirror_graph");
+		const bool media_split = gpu.supported_functions.gpu_media_utilization;
+		auto& graph_up_height = graph_up_height_vec[index];
 		string out;
 		int height = gpu_b_height_offsets[index] + 4;
 		out.reserve(width * height);
@@ -1048,8 +1053,17 @@ namespace Gpu {
 		if (redraw[index]) {
 			out += box[index];
 
-			graph_up_height = single_graph ? b_height_vec[index] : (b_height_vec[index] + 1) / 2;
-			int graph_low_height = single_graph ? 0 : b_height_vec[index] - graph_up_height;
+			const int graph_area = b_height_vec[index];
+			bool graph_mid_line = media_split and not single_graph and graph_area >= 3;
+			graph_up_height = single_graph ? graph_area
+				: (int)ceil((double)graph_area / 2) - (graph_mid_line and graph_area % 2 != 0);
+			int graph_low_height = single_graph ? 0 : graph_area - graph_up_height - (int)graph_mid_line;
+			if (graph_low_height < 1) {
+				graph_mid_line = false;
+				graph_up_height = single_graph ? graph_area : (graph_area + 1) / 2;
+				graph_low_height = single_graph ? 0 : graph_area - graph_up_height;
+			}
+			graph_mid_line_vec[index] = graph_mid_line;
 
 			if (gpu.supported_functions.gpu_utilization) {
 				graph_upper = Draw::Graph{x + width - b_width - 3, graph_up_height, "cpu", safeVal(gpu.gpu_percent, "gpu-totals"s), graph_symbol, false, true}; // TODO cpu -> gpu
@@ -1057,12 +1071,14 @@ namespace Gpu {
                 	graph_lower = Draw::Graph{
                     	x + width - b_width - 3,
                     	graph_low_height, "cpu",
-                    	safeVal(gpu.gpu_percent, "gpu-totals"s),
+                    	safeVal(gpu.gpu_percent, media_split ? "gpu-media-totals"s : "gpu-totals"s),
                     	graph_symbol,
-                    	Config::getB("cpu_invert_lower"), true
+                    	media_split or Config::getB("cpu_invert_lower"), true
                 	};
             	}
 				gpu_meter = Draw::Meter{b_width - (show_temps ? 25 : 12), "cpu"};
+				if (media_split)
+					media_meter = Draw::Meter{b_width - 12, "cpu"};
 			}
 			if (gpu.supported_functions.temp_info)
 				temp_graph = Draw::Graph{6, 1, "temp", gpu.temp, graph_symbol, false, false, gpu.temp_max, -23};
@@ -1081,9 +1097,19 @@ namespace Gpu {
 		int rows_used = 1;
 		//? Gpu graph, meter & clock speed
 		if (gpu.supported_functions.gpu_utilization) {
+			const bool graph_mid_line = graph_mid_line_vec[index];
 			out += Fx::ub + Mv::to(y + rows_used, x + 1) + graph_upper(safeVal(gpu.gpu_percent, "gpu-totals"s), (data_same or redraw[index]));
+			if (graph_mid_line) {
+				static const string up_label = "gpu";
+				static const string lo_label = "mpu";
+				out += Mv::to(y + rows_used + graph_up_height, x) + Fx::ub + Theme::c("cpu_box") + Symbols::div_left
+					+ Theme::c("div_line") + Symbols::h_line * (width - b_width - 2) + Symbols::div_right
+					+ Mv::to(y + rows_used + graph_up_height, x + ((width - b_width) / 2) - ((up_label.size() + lo_label.size()) / 2) - 4)
+					+ Theme::c("main_fg") + up_label + Mv::r(1) + "▲▼" + Mv::r(1) + lo_label;
+			}
 			if (not single_graph)
-				out += Mv::to(y + rows_used + graph_up_height, x + 1) + graph_lower(safeVal(gpu.gpu_percent, "gpu-totals"s), (data_same or redraw[index]));
+				out += Mv::to(y + rows_used + graph_up_height + (int)graph_mid_line, x + 1)
+					+ graph_lower(safeVal(gpu.gpu_percent, media_split ? "gpu-media-totals"s : "gpu-totals"s), (data_same or redraw[index]));
 
 			out += Mv::to(b_y + rows_used, b_x + 1) + Theme::c("main_fg") + Fx::b + "GPU " + gpu_meter(safeVal(gpu.gpu_percent, "gpu-totals"s).back())
 				+ Theme::g("cpu").at(clamp(safeVal(gpu.gpu_percent, "gpu-totals"s).back(), 0ll, 100ll)) + rjust(to_string(safeVal(gpu.gpu_percent, "gpu-totals"s).back()), 5) + Theme::c("main_fg") + '%';
@@ -1097,6 +1123,14 @@ namespace Gpu {
 			}
 			out += Theme::c("div_line") + Symbols::v_line;
 			rows_used++;
+			if (media_split) {
+				const auto& media = gpu.gpu_percent.at("gpu-media-totals");
+				const auto media_pct = media.empty() ? 0ll : media.back();
+				out += Mv::to(b_y + rows_used, b_x + 1) + Theme::c("main_fg") + Fx::b + "MPU " + media_meter(media_pct)
+					+ Theme::g("cpu").at(clamp(media_pct, 0ll, 100ll)) + rjust(to_string(media_pct), 5) + Theme::c("main_fg") + '%';
+				out += Theme::c("div_line") + Symbols::v_line;
+				rows_used++;
+			}
 		}
 
 		if (gpu.supported_functions.gpu_clock) {
@@ -2354,9 +2388,12 @@ namespace Draw {
 			b_height_vec.resize(shown);
 			box.resize(shown);
 			graph_upper_vec.resize(shown); graph_lower_vec.resize(shown);
+			graph_up_height_vec.resize(shown);
+			graph_mid_line_vec.resize(shown);
 			temp_graph_vec.resize(shown);
 			mem_used_graph_vec.resize(shown); mem_util_graph_vec.resize(shown);
 			gpu_meter_vec.resize(shown);
+			media_meter_vec.resize(shown);
 			pwr_meter_vec.resize(shown);
 			enc_meter_vec.resize(shown);
 			redraw.resize(shown);

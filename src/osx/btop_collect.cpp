@@ -727,6 +727,7 @@ namespace Shared {
 			gpu_b_height_offsets.resize(gpus.size());
 			for (size_t i = 0; i < gpu_b_height_offsets.size(); ++i)
 				gpu_b_height_offsets[i] = gpus[i].supported_functions.gpu_utilization
+					+ gpus[i].supported_functions.gpu_media_utilization
 					+ gpus[i].supported_functions.pwr_usage
 					+ (gpus[i].supported_functions.encoder_utilization or gpus[i].supported_functions.decoder_utilization)
 					+ (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
