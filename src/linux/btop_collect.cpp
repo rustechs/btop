@@ -291,11 +291,12 @@ namespace Gpu {
 		struct xe_gt_sample {
 			fs::path idle_path;
 			fs::path freq_path;
+			string gt_name;
 			uint64_t prev_idle = 0;
 			std::chrono::steady_clock::time_point prev_ts{};
 			bool have_prev = false;
 		};
-		xe_gt_sample xe_rc{};
+		vector<xe_gt_sample> xe_gts;
 
 		bool initialized = false;
 		bool init();
@@ -1904,7 +1905,23 @@ namespace Gpu {
 			catch (const std::out_of_range&) { return false; }
 		}
 
-		static bool discover_xe_gtidle(xe_gt_sample& sample) {
+		static int xe_gt_rank(const string& gt_name) {
+			if (gt_name.find("-rc") != string::npos) return 0;
+			if (gt_name.find("-mc") != string::npos) return 1;
+			return 2;
+		}
+
+		static string xe_display_name(const char* gpu_device_name, const xe_gt_sample& sample, bool multi) {
+			const string base = gpu_device_name ? string(gpu_device_name) : "Intel GPU";
+			if (not multi) return base;
+			if (sample.gt_name.find("-rc") != string::npos) return base + " (RC)";
+			if (sample.gt_name.find("-mc") != string::npos) return base + " (Media)";
+			if (not sample.gt_name.empty()) return base + " (" + sample.gt_name + ")";
+			return base;
+		}
+
+		static bool discover_xe_gtidle() {
+			xe_gts.clear();
 			const fs::path drm{"/sys/class/drm"};
 			if (not fs::is_directory(drm)) return false;
 
@@ -1914,7 +1931,7 @@ namespace Gpu {
 				const auto vendor = readfile(card.path() / "device" / "vendor", "");
 				if (vendor.find("8086") == string::npos) continue;
 
-				fs::path rc_idle, any_idle, rc_freq, any_freq;
+				vector<xe_gt_sample> found;
 				const fs::path device_dir = card.path() / "device";
 				if (not fs::is_directory(device_dir)) continue;
 				for (const auto& tile : fs::directory_iterator(device_dir)) {
@@ -1922,38 +1939,40 @@ namespace Gpu {
 					for (const auto& gt : fs::directory_iterator(tile.path())) {
 						if (not gt.is_directory() or not gt.path().filename().string().starts_with("gt")) continue;
 						const fs::path idle = gt.path() / "gtidle" / "idle_residency_ms";
-						const fs::path freq = gt.path() / "freq0" / "cur_freq";
 						if (not fs::exists(idle)) continue;
-						const string gt_name = readfile(gt.path() / "gtidle" / "name", "");
-						if (any_idle.empty()) {
-							any_idle = idle;
-							if (fs::exists(freq)) any_freq = freq;
-						}
-						if (gt_name.find("-rc") != string::npos) {
-							rc_idle = idle;
-							if (fs::exists(freq)) rc_freq = freq;
-						}
+						xe_gt_sample sample{};
+						sample.idle_path = idle;
+						sample.gt_name = readfile(gt.path() / "gtidle" / "name", "");
+						const fs::path freq = gt.path() / "freq0" / "cur_freq";
+						if (fs::exists(freq)) sample.freq_path = freq;
+						found.push_back(std::move(sample));
 					}
 				}
-				if (rc_idle.empty()) rc_idle = any_idle;
-				if (rc_freq.empty()) rc_freq = any_freq;
-				if (rc_idle.empty()) continue;
-				sample.idle_path = rc_idle;
-				sample.freq_path = rc_freq;
-				sample.have_prev = false;
-				Logger::info("Intel GPU: using Xe gtidle sysfs at {}", rc_idle.string());
+				if (found.empty()) continue;
+				rng::stable_sort(found, [](const xe_gt_sample& a, const xe_gt_sample& b) {
+					return xe_gt_rank(a.gt_name) < xe_gt_rank(b.gt_name);
+				});
+				xe_gts = std::move(found);
+				for (const auto& sample : xe_gts)
+					Logger::info("Intel GPU: using Xe gtidle sysfs at {} ({})", sample.idle_path.string(), sample.gt_name);
 				return true;
 			}
 			return false;
 		}
 
 		static void finish_intel_init(const char* gpu_device_name) {
-			device_count = 1;
 			gpus.resize(gpus.size() + device_count);
-			gpu_names.resize(gpus.size() + device_count);
-			gpu_names[Nvml::device_count + Rsmi::device_count] = gpu_device_name ? string(gpu_device_name) : "Intel GPU";
+			gpu_names.resize(gpus.size());
+			const size_t intel_base = Nvml::device_count + Rsmi::device_count;
+			if (using_xe_sysfs) {
+				const bool multi = xe_gts.size() > 1;
+				for (size_t i = 0; i < xe_gts.size(); ++i)
+					gpu_names[intel_base + i] = xe_display_name(gpu_device_name, xe_gts[i], multi);
+			} else {
+				gpu_names[intel_base] = gpu_device_name ? string(gpu_device_name) : "Intel GPU";
+			}
 			initialized = true;
-			Intel::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count);
+			Intel::collect<1>(gpus.data() + intel_base);
 		}
 
 		bool init() {
@@ -1976,14 +1995,16 @@ namespace Gpu {
 				} else {
 					pmu_sample(engines);
 					using_xe_sysfs = false;
+					device_count = 1;
 					finish_intel_init(gpu_device_name);
 					if (gpu_device_name) free(gpu_device_name);
 					return true;
 				}
 			}
 
-			if (discover_xe_gtidle(xe_rc)) {
+			if (discover_xe_gtidle()) {
 				using_xe_sysfs = true;
+				device_count = static_cast<uint32_t>(xe_gts.size());
 				finish_intel_init(gpu_device_name);
 				if (gpu_device_name) free(gpu_device_name);
 				return true;
@@ -2001,21 +2022,69 @@ namespace Gpu {
 				engines = nullptr;
 			}
 			using_xe_sysfs = false;
-			xe_rc = {};
+			xe_gts.clear();
 			initialized = false;
 			return true;
+		}
+
+		static void collect_xe_gt(gpu_info& gpu, xe_gt_sample& sample) {
+			uint64_t idle_ms = 0;
+			if (not read_u64_path(sample.idle_path, idle_ms)) return;
+			const auto now = std::chrono::steady_clock::now();
+			long long util = 0;
+			if (sample.have_prev) {
+				const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - sample.prev_ts).count();
+				if (wall_ms > 0 and idle_ms >= sample.prev_idle) {
+					const double busy = 1.0 - (static_cast<double>(idle_ms - sample.prev_idle) / static_cast<double>(wall_ms));
+					util = clamp(static_cast<long long>(round(busy * 100.0)), 0ll, 100ll);
+				}
+			}
+			sample.prev_idle = idle_ms;
+			sample.prev_ts = now;
+			sample.have_prev = true;
+			gpu.gpu_percent.at("gpu-totals").push_back(util);
+
+			if (not sample.freq_path.empty()) {
+				uint64_t freq = 0;
+				if (read_u64_path(sample.freq_path, freq))
+					gpu.gpu_clock_speed = static_cast<unsigned int>(freq);
+			}
 		}
 
 		template <bool is_init> bool collect(gpu_info* gpus_slice) {
 			if (!initialized) return false;
 
+			if (using_xe_sysfs) {
+				for (uint32_t i = 0; i < device_count; ++i) {
+					if constexpr(is_init) {
+						gpus_slice[i].supported_functions = {
+							.gpu_utilization = true,
+							.mem_utilization = false,
+							.gpu_clock = not xe_gts[i].freq_path.empty(),
+							.mem_clock = false,
+							.pwr_usage = false,
+							.pwr_state = false,
+							.temp_info = false,
+							.mem_total = false,
+							.mem_used = false,
+							.pcie_txrx = false,
+							.encoder_utilization = false,
+							.decoder_utilization = false
+						};
+						gpus_slice[i].pwr_max_usage = 10'000; //? 10W
+					}
+					collect_xe_gt(gpus_slice[i], xe_gts[i]);
+				}
+				return true;
+			}
+
 			if constexpr(is_init) {
 				gpus_slice->supported_functions = {
 					.gpu_utilization = true,
 					.mem_utilization = false,
-					.gpu_clock = not using_xe_sysfs or not xe_rc.freq_path.empty(),
+					.gpu_clock = true,
 					.mem_clock = false,
-					.pwr_usage = not using_xe_sysfs,
+					.pwr_usage = true,
 					.pwr_state = false,
 					.temp_info = false,
 					.mem_total = false,
@@ -2026,31 +2095,6 @@ namespace Gpu {
 				};
 
 				gpus_slice->pwr_max_usage = 10'000; //? 10W
-			}
-
-			if (using_xe_sysfs) {
-				uint64_t idle_ms = 0;
-				if (not read_u64_path(xe_rc.idle_path, idle_ms)) return false;
-				const auto now = std::chrono::steady_clock::now();
-				long long util = 0;
-				if (xe_rc.have_prev) {
-					const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - xe_rc.prev_ts).count();
-					if (wall_ms > 0 and idle_ms >= xe_rc.prev_idle) {
-						const double busy = 1.0 - (static_cast<double>(idle_ms - xe_rc.prev_idle) / static_cast<double>(wall_ms));
-						util = clamp(static_cast<long long>(round(busy * 100.0)), 0ll, 100ll);
-					}
-				}
-				xe_rc.prev_idle = idle_ms;
-				xe_rc.prev_ts = now;
-				xe_rc.have_prev = true;
-				gpus_slice->gpu_percent.at("gpu-totals").push_back(util);
-
-				if (not xe_rc.freq_path.empty()) {
-					uint64_t freq = 0;
-					if (read_u64_path(xe_rc.freq_path, freq))
-						gpus_slice->gpu_clock_speed = static_cast<unsigned int>(freq);
-				}
-				return true;
 			}
 
 			pmu_sample(engines);
