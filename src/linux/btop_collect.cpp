@@ -1920,6 +1920,15 @@ namespace Gpu {
 			return base;
 		}
 
+		//? btop boxes are gpu0..gpu5 (Config::valid_boxes)
+		static constexpr uint32_t kMaxGpuBoxes = 6;
+
+		static uint32_t gpu_boxes_remaining() {
+			const size_t already = Nvml::device_count + Rsmi::device_count;
+			if (already >= kMaxGpuBoxes) return 0;
+			return static_cast<uint32_t>(kMaxGpuBoxes - already);
+		}
+
 		static bool discover_xe_gtidle() {
 			xe_gts.clear();
 			const fs::path drm{"/sys/class/drm"};
@@ -1993,6 +2002,13 @@ namespace Gpu {
 					free_engines(engines);
 					engines = nullptr;
 				} else {
+					if (gpu_boxes_remaining() < 1) {
+						free_engines(engines);
+						engines = nullptr;
+						if (gpu_device_name) free(gpu_device_name);
+						Logger::debug("Intel GPU: no remaining GPU boxes for i915");
+						return false;
+					}
 					pmu_sample(engines);
 					using_xe_sysfs = false;
 					device_count = 1;
@@ -2004,6 +2020,18 @@ namespace Gpu {
 
 			if (discover_xe_gtidle()) {
 				using_xe_sysfs = true;
+				const uint32_t slots = gpu_boxes_remaining();
+				if (xe_gts.size() > slots) {
+					Logger::info("Intel GPU: {} Xe GT(s) exceed gpu0-gpu5 ({} already taken); keeping {}",
+						xe_gts.size(), Nvml::device_count + Rsmi::device_count, slots);
+					xe_gts.resize(slots);
+				}
+				if (xe_gts.empty()) {
+					using_xe_sysfs = false;
+					if (gpu_device_name) free(gpu_device_name);
+					Logger::debug("Intel GPU: no remaining GPU boxes for Xe GTs");
+					return false;
+				}
 				device_count = static_cast<uint32_t>(xe_gts.size());
 				finish_intel_init(gpu_device_name);
 				if (gpu_device_name) free(gpu_device_name);
