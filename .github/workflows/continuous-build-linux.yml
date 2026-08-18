@@ -37,28 +37,9 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
+        # rustechs: one musl job on push/PR. Remaining upstream targets were
+        # dropped to cut runner minutes; restore from v1.4.7 if needed.
         toolchain:
-          - aarch64-unknown-linux-musl
-          - arm-unknown-linux-musleabi
-          - arm-unknown-linux-musleabihf
-          - armv7-unknown-linux-musleabi
-          - armv7-unknown-linux-musleabihf
-          - i586-unknown-linux-musl
-          - i686-unknown-linux-musl
-          - m68k-unknown-linux-musl
-          - mips-unknown-linux-musl
-          - mips-unknown-linux-muslsf
-          - mips64-unknown-linux-musl
-          - mips64el-unknown-linux-musl
-          - mipsel-unknown-linux-musl
-          - mipsel-unknown-linux-muslsf
-          - powerpc-unknown-linux-musl
-          - powerpc64-unknown-linux-musl
-          - powerpc64le-unknown-linux-musl
-          - powerpcle-unknown-linux-musl
-          - riscv32-unknown-linux-musl
-          - riscv64-unknown-linux-musl
-          - s390x-ibm-linux-musl
           - x86_64-unknown-linux-musl
     env:
       TOOLCHAIN: "${{ matrix.toolchain }}"

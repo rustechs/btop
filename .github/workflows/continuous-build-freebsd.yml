@@ -3,33 +3,8 @@ name: Continuous Build FreeBSD
 permissions: {}
 
 on:
+  # rustechs: QEMU BSD jobs are manual only (runner minutes).
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    tags-ignore:
-      - '*.*'
-    paths:
-      - 'src/**'
-      - '!src/linux/**'
-      - '!src/osx/**'
-      - '!src/netbsd/**'
-      - '!src/openbsd/**'
-      - 'include/**'
-      - 'Makefile'
-      - '.github/workflows/continuous-build-freebsd.yml'
-  pull_request:
-    branches:
-      - main
-    paths:
-      - 'src/**'
-      - '!src/linux/**'
-      - '!src/osx/**'
-      - '!src/netbsd/**'
-      - '!src/openbsd/**'
-      - 'include/**'
-      - 'Makefile'
-      - '.github/workflows/continuous-build-freebsd.yml'
 
 jobs:
   build-freebsd:

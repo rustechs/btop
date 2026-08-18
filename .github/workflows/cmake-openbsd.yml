@@ -3,28 +3,8 @@ name: OpenBSD CMake
 permissions: {}
 
 on:
+  # rustechs: QEMU BSD jobs are manual only (runner minutes).
   workflow_dispatch:
-  push:
-    branches: main
-    tags-ignore: '*.*'
-    paths:
-      - '.github/workflows/cmake-openbsd.yml'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - 'include/**'
-      - 'src/*pp'
-      - 'src/openbsd/*pp'
-      - 'tests/**'
-  pull_request:
-    branches: main
-    paths:
-      - '.github/workflows/cmake-openbsd.yml'
-      - 'CMakeLists.txt'
-      - 'cmake/**'
-      - 'include/**'
-      - 'src/*pp'
-      - 'src/openbsd/*pp'
-      - 'tests/**'
 
 jobs:
   build:
